@@ -1,0 +1,22 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: shellcheck git-worktree-set test_git_worktree_set.sh
+      - name: Test
+        run: ./test_git_worktree_set.sh
+      - name: Test with Bash 3.2
+        if: runner.os == 'macOS'
+        run: BASH_UNDER_TEST=/bin/bash ./test_git_worktree_set.sh

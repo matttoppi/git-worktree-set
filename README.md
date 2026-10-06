@@ -23,13 +23,25 @@ git worktree-set remove --merged        # remove each set that is merged
 
 ## Install
 
-It is one Bash file with no dependencies other than Git 2.31 or later.
+It is one Bash file. It needs Bash 3.2 or later and Git 2.38 or later.
 
 ```sh
 ln -s "$PWD/git-worktree-set" /usr/local/bin/git-worktree-set
 ```
 
 Git runs any executable named `git-<name>` on the `PATH` as `git <name>`.
+Git sends `git worktree-set --help` to `man`, and there is no manual page. Use
+`git worktree-set help`.
+
+### Agent skill
+
+`skills/git-worktree-set/SKILL.md` tells a coding agent how to use the tool.
+Link it into the skill directory of your agent:
+
+```sh
+ln -s "$PWD/skills/git-worktree-set" ~/.claude/skills/git-worktree-set   # Claude Code
+ln -s "$PWD/skills/git-worktree-set" ~/.codex/skills/git-worktree-set    # Codex
+```
 
 ## Design
 
@@ -40,7 +52,10 @@ Git runs any executable named `git-<name>` on the `PATH` as `git <name>`.
   tool finds the root from inside any checkout, any worktree, or the root.
 - **Same shape as the root.** A set uses the same directory names as the root,
   so relative paths between repositories continue to work. The set is below
-  the root, so files such as `CLAUDE.md` and `.envrc` above it stay in effect.
+  the root, so a tool that reads files from parent directories still finds the
+  files of the root. Examples are Claude Code with `CLAUDE.md` and direnv with
+  `.envrc`. Codex reads `AGENTS.md` only from the repository root down, so it
+  does not read a root `AGENTS.md` from inside a set.
 - **Removal cannot lose work.** See below. There is no force option.
 
 ## Commands
@@ -50,17 +65,37 @@ Git runs any executable named `git-<name>` on the `PATH` as `git <name>`.
 For each repository:
 
 1. Fetch `origin`.
-2. If branch `<name>` exists, check it out. If not, create it from `--from`,
-   or from the default branch of `origin`.
+2. If branch `<name>` exists, check it out. If only `origin/<name>` exists,
+   create `<name>` from it, so that pushed work continues. If neither exists,
+   create `<name>` from `--from`, or from the default branch (see below).
 3. Lock the worktree. A locked worktree makes `git worktree remove --force`
    and `git worktree prune` refuse, so other tools cannot delete it by accident.
 4. Copy the files that `.worktreeinclude` lists (see below).
 
 All checks run before the first change. `new` prints only the set directory on
-stdout, so scripts can use `cd "$(git worktree-set new ...)"`.
+stdout, so scripts can use `cd "$(git worktree-set new ...)"`. Options can come
+before or after the name.
 
 With no repository, `new` makes an empty set. This is useful when you do not
 know yet which repositories the task needs.
+
+For `--from <branch>` and for the default branch, `new` uses
+`origin/<branch>`. It uses the local `<branch>` when that branch contains
+`origin/<branch>` and has more commits. If each has commits that the other does
+not have, `new` uses `origin/<branch>` and prints a warning.
+
+### Default branch
+
+The default branch of a repository is the value of the Git configuration key
+`worktree-set.defaultBranch`, else the default branch of `origin`
+(`origin/HEAD`). Set the key when work merges into a different branch:
+
+```sh
+git -C web config worktree-set.defaultBranch dev
+```
+
+`new` starts new branches from the default branch. `remove` and
+`remove --merged` compare each branch with it.
 
 ### `add <repository>...`
 
@@ -75,6 +110,11 @@ sets. `--porcelain` prints one line for each worktree, with tab separators:
 ```text
 <set> <repository> <branch> <changed files> <commits on no remote> <path>
 ```
+
+For a worktree with a detached HEAD, `status` shows where the set branch is
+checked out, if another worktree has it. A directory in `.worktrees/` that is
+itself a worktree is not a set. `status` marks it, and `--porcelain` leaves it
+out.
 
 ### `remove [<name>]`
 
@@ -91,12 +131,14 @@ these conditions:
 Ignored files do not block removal. This is the rule of `git worktree remove`:
 a file that Git ignores is a file that can be made again. If you edit an
 ignored file such as `.env.local` in a set, copy the edit before you remove
-the set.
+the set. Keep results that you need later, such as test reports or
+measurements, outside the worktrees.
 
 Then it runs `git worktree remove` without `--force`. It deletes the branch in
 two cases only:
 
-- Each commit of the branch is on a remote.
+- Each commit of the branch is on a remote. `new <name>` then continues from
+  `origin/<name>`.
 - A merge of the branch into the default branch changes nothing. This is true
   after a squash merge or a rebase merge.
 
@@ -110,13 +152,14 @@ refusals apply to each set. It keeps all other sets and prints one line for
 each of them.
 
 A new set has no commits, so it counts as merged, as a new branch does for
-`git branch --merged`. For this reason `remove --merged` keeps a set for one
-day after the last change of its members (the modification time of the set
-directory). It is thus safe to run on a schedule. `remove <name>` has no such
-limit.
+`git branch --merged`. For this reason `remove --merged` keeps a set that had
+activity in the last day. Activity is a change to the set directory (`new` or
+`add`), or a change to the index or the HEAD log of one of its worktrees (a
+commit, a checkout, or a Git command that found changed files). It is thus
+safe to run on a schedule. `remove <name>` has no such limit.
 
-A directory in `.worktrees/` that is itself a worktree is not a set.
-`remove --merged` keeps it.
+`remove --merged` also keeps a set in which a worktree has a detached HEAD, and
+a directory in `.worktrees/` that is itself a worktree.
 
 ### Scheduled cleanup
 
@@ -169,7 +212,6 @@ Example:
 
 ```sh
 #!/bin/sh
-ln -sf "$GIT_WORKTREE_SET_ROOT/AGENTS.md" AGENTS.md
 echo "PORT=$GIT_WORKTREE_SET_PORT_BASE" > .worktree-set.env
 for repository in $GIT_WORKTREE_SET_REPOSITORIES; do
   if [ -f "$repository/package-lock.json" ]; then (cd "$repository" && npm ci --prefer-offline); fi
@@ -179,8 +221,9 @@ done
 ## Claude Code
 
 Claude Code can make a set for `claude --worktree <name>` when you start it in
-the root. Put two hooks in `<root>/.claude/settings.json`. Tested with Claude
-Code 2.1.287; the hook input field is `name`.
+the root. Put two hooks in `<root>/.claude/settings.json`. The `WorktreeCreate`
+hook was tested with Claude Code 2.1.287, where the hook input field is `name`.
+The `WorktreeRemove` hook is not tested yet. The hooks need `jq`.
 
 ```json
 {
@@ -220,12 +263,30 @@ implement the two rules itself. The layout is plain Git in both cases.
 BASH_UNDER_TEST=/bin/bash ./test_git_worktree_set.sh   # Bash 3.2 on macOS
 ```
 
+The workflow in `.github/workflows/test.yml` runs the tests on Linux and macOS.
+
 ## Limits
 
 - The repositories must be normal clones, one level below the root. Bare
   repositories and submodules are not supported.
 - File names that contain a newline are not supported in `.worktreeinclude`.
 - Two set names can get the same port block (1 in 1000).
+- If Git refuses to remove a worktree after all checks pass, `remove` stops.
+  The worktrees that it removed before stay removed, and the others stay.
+  Correct the cause and run `remove` again.
+- Windows is not tested.
+
+## Related tools
+
+- worktrunk and gwq manage the worktrees of one repository.
+- Conductor and the Codex app make worktrees for agents, one repository at a
+  time.
+- worktree-flow, brunch, and qdpi make worktrees across several repositories.
+- mani and repo run commands across many repositories. They do not make
+  worktrees.
+
+`git-worktree-set` keeps no state outside Git, refuses each removal that can
+lose work, and leaves a layout that plain Git commands and agents can use.
 
 ## License
 
