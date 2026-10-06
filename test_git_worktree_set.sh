@@ -206,6 +206,13 @@ output=$(worktree_set new cas-11 bridge 2>/dev/null)
 check "new starts from the configured default branch" test "$(git -C "$output/bridge" log -1 --format=%s)" = "integrated work"
 git -C "$root/bridge" config --unset worktree-set.defaultBranch
 
+# --- a failing setup hook prints a warning and does not fail new
+mv "$root/.worktree-set-setup" "$root/.worktree-set-setup.saved"
+printf '#!/bin/sh\nexit 1\n' >"$root/.worktree-set-setup" && chmod +x "$root/.worktree-set-setup"
+output=$(worktree_set new cas-12 ui 2>/dev/null)
+check "a failing setup hook leaves new successful, with the set directory on stdout" test "$output" = "$root/.worktrees/cas-12"
+mv "$root/.worktree-set-setup.saved" "$root/.worktree-set-setup"
+
 # --- root discovery does not go above the directory that holds the repositories
 check "a directory above the root is not taken as a root" sh -c "cd '$sandbox' && ! '$shell' '$tool' status"
 

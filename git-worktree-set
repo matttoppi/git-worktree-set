@@ -266,7 +266,7 @@ cmd_new() {
         GIT_WORKTREE_SET_REPOSITORIES="${repositories[*]-}" \
         GIT_WORKTREE_SET_PORT_BASE=$(port_base "$name") \
         "$root/$SETUP_HOOK"
-    ) >&2 || die "$SETUP_HOOK failed; the worktree set stays at $directory"
+    ) >&2 || info "warning: $SETUP_HOOK failed; the set is usable, but its setup is not complete"
   fi
   printf '%s\n' "$directory"
 }

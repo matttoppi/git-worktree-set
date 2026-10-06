@@ -36,7 +36,15 @@ Git sends `git worktree-set --help` to `man`, and there is no manual page. Use
 ### Agent skill
 
 `skills/git-worktree-set/SKILL.md` tells a coding agent how to use the tool.
-Link it into the skill directory of your agent:
+It is an [Agent Skills](https://agentskills.io) skill, so Claude Code, Codex,
+and other agents can use the same file. Install it with the
+[skills CLI](https://github.com/vercel-labs/skills):
+
+```sh
+npx skills add matttoppi/git-worktree-set --global
+```
+
+Or link it from a clone into the skill directory of your agent:
 
 ```sh
 ln -s "$PWD/skills/git-worktree-set" ~/.claude/skills/git-worktree-set   # Claude Code
@@ -47,16 +55,18 @@ ln -s "$PWD/skills/git-worktree-set" ~/.codex/skills/git-worktree-set    # Codex
 
 - **No state.** Git is the database. The members of a set are the worktrees in
   its directory. The branch, the main checkout, and the lock come from Git.
-- **No configuration.** The root is the directory that holds your
+- **No required configuration.** The root is the directory that holds your
   repositories. A repository is a child directory that contains `.git`. The
   tool finds the root from inside any checkout, any worktree, or the root.
 - **Same shape as the root.** A set uses the same directory names as the root,
   so relative paths between repositories continue to work. The set is below
   the root, so a tool that reads files from parent directories still finds the
-  files of the root. Examples are Claude Code with `CLAUDE.md` and direnv with
-  `.envrc`. Codex reads `AGENTS.md` only from the repository root down, so it
-  does not read a root `AGENTS.md` from inside a set.
+  files of the root, for example direnv with `.envrc`. For agent instructions,
+  see [Agent instructions](#agent-instructions).
 - **Removal cannot lose work.** See below. There is no force option.
+- **Everything else is optional.** The script works alone. The agent skill,
+  `.worktreeinclude`, the setup hook, the Claude Code hooks, and scheduled
+  cleanup are each optional, and the tool does not install any of them.
 
 ## Commands
 
@@ -144,6 +154,14 @@ two cases only:
 
 In all other cases the branch stays, and `new <name>` continues from it.
 
+To discard a set on purpose, use Git directly. `--force` twice removes a
+locked worktree with its changes:
+
+```sh
+git -C <root>/<repository> worktree remove --force --force <root>/.worktrees/<name>/<repository>
+git -C <root>/<repository> branch -D <name>
+```
+
 ### `remove --merged`
 
 `remove --merged` fetches each repository, then removes each set in which a
@@ -195,6 +213,8 @@ copy cannot become a change in the worktree.
 
 If `<root>/.worktree-set-setup` is executable, `new` runs it one time in the
 set directory. Use it to install dependencies, assign ports, or link files.
+The hook is optional. If it fails, `new` prints a warning and the set is still
+usable.
 
 | Variable | Value |
 |---|---|
@@ -236,9 +256,24 @@ The `WorktreeRemove` hook is not tested yet. The hooks need `jq`.
 }
 ```
 
-The session starts in an empty set. Tell the agent in the root `CLAUDE.md` to
-run `git worktree-set add <repository>` for each repository that the task
-needs.
+The session starts in an empty set. The agent skill tells the agent to run
+`git worktree-set add <repository>` for each repository that the task needs.
+
+## Agent instructions
+
+Keep agent instructions in `AGENTS.md` files. Claude Code, Codex, and most
+other agents read them. A set changes which files an agent finds:
+
+- Each worktree has the `AGENTS.md` files of its repository, because they are
+  tracked files.
+- Claude Code also reads `AGENTS.md` files in the directories above the working
+  directory, so it reads a root `AGENTS.md` from inside a set. It reads them
+  only when there is no `CLAUDE.md` in the working directory or above it.
+- Codex reads `AGENTS.md` files from the repository root down, so it does not
+  read a root `AGENTS.md` from inside a set.
+
+Thus put the guidance for worktree sets in the agent skill, and put the
+guidance for a repository in the `AGENTS.md` of that repository.
 
 ## Convention for tools
 
