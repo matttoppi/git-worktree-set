@@ -206,6 +206,23 @@ output=$(worktree_set new cas-11 bridge 2>/dev/null)
 check "new starts from the configured default branch" test "$(git -C "$output/bridge" log -1 --format=%s)" = "integrated work"
 git -C "$root/bridge" config --unset worktree-set.defaultBranch
 
+# --- conditions that must stop removal before the first worktree is removed
+guarded=$(worktree_set new cas-14 ui 2>/dev/null)
+git clone -q "$sandbox/remotes/bridge.git" "$guarded/zz-clone" 2>/dev/null
+check "remove refuses a set that holds an independent clone" refuses worktree_set remove cas-14
+check "after that refusal the worktree of the set still exists" test -e "$guarded/ui/file.txt"
+mv "$guarded/zz-clone" "$HOME/independent-clone"
+index=$(git -C "$guarded/ui" rev-parse --git-path index)
+echo damaged >"$index"
+check "remove refuses when git status fails" refuses worktree_set remove cas-14
+rm "$index" && git -C "$guarded/ui" reset -q
+
+# --- remove deletes only the branch of the set
+other=$(worktree_set new cas-15 lambdas 2>/dev/null)
+git -C "$other/lambdas" switch -q -c other-branch
+worktree_set remove cas-15 >/dev/null 2>&1
+check "remove keeps a branch that is not the branch of the set" git -C "$root/lambdas" show-ref --verify --quiet refs/heads/other-branch
+
 # --- a set folder that was deleted by hand
 deleted=$(worktree_set new cas-13 lambdas 2>/dev/null)
 mv "$deleted" "$sandbox/deleted-set"

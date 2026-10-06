@@ -357,12 +357,20 @@ lock_line() {
 
 # Prints one line for each reason that removal of the worktree at $1 can lose work.
 removal_blockers() {
-  local worktree=$1 main lock
+  local worktree=$1 main lock status
+  if [ ! -f "$worktree/.git" ]; then
+    echo "an independent repository, not a worktree"
+    return
+  fi
   main=$(main_checkout "$worktree") || {
     echo "not a usable worktree"
     return
   }
-  git -C "$worktree" --no-optional-locks status --porcelain | sed 's/^/not committed: /'
+  status=$(git -C "$worktree" --no-optional-locks status --porcelain) || {
+    echo "git status failed"
+    return
+  }
+  if [ -n "$status" ]; then printf '%s\n' "$status" | sed 's/^/not committed: /'; fi
   if ! git -C "$worktree" symbolic-ref --quiet HEAD >/dev/null &&
     [ "$(git -C "$worktree" rev-list --count HEAD --not --branches --remotes --tags)" != 0 ]; then
     echo "detached HEAD has commits that are on no branch"
@@ -492,29 +500,40 @@ cmd_remove() {
 
   # Leave the set before Git deletes the current directory.
   cd "$root"
-  local main branch
+  local main branch set_branch lock commit
   while IFS= read -r worktree; do
     main=$(main_checkout "$worktree")
     branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD) || branch=""
+    # The set branch is in the lock reason. A set made by hand has no lock.
+    lock=$(lock_line "$main" "$worktree")
+    case $lock in
+      "locked $LOCK_REASON_PREFIX: "*) set_branch=${lock#"locked $LOCK_REASON_PREFIX: "} ;;
+      *) set_branch=$name ;;
+    esac
     git -C "$main" worktree unlock "$worktree" 2>/dev/null || true
     if ! git -C "$main" worktree remove "$worktree" >&2; then
-      git -C "$main" worktree lock --reason "$LOCK_REASON_PREFIX: $name" "$worktree" 2>/dev/null || true
+      git -C "$main" worktree lock --reason "$LOCK_REASON_PREFIX: $set_branch" "$worktree" 2>/dev/null || true
       die "Git refused to remove $worktree; it and the remaining worktrees stay"
     fi
     if [ -z "$branch" ]; then
       info "$(basename "$worktree"): removed"
       continue
     fi
+    if [ "$branch" != "$set_branch" ]; then
+      info "$(basename "$worktree"): removed; branch $branch kept (it is not the branch of the set)"
+      continue
+    fi
     # Delete the branch only when no commit can be lost.
+    commit=$(git -C "$main" rev-parse --short "$branch")
     if [ "$(git -C "$main" rev-list --count "$branch" --not --remotes)" != 0 ]; then
       git -C "$main" fetch --quiet origin 2>/dev/null || true
     fi
     if [ "$(git -C "$main" rev-list --count "$branch" --not --remotes)" = 0 ]; then
       git -C "$main" branch --quiet -D "$branch"
-      info "$(basename "$worktree"): removed; branch $branch deleted (all commits are on a remote)"
+      info "$(basename "$worktree"): removed; branch $branch deleted, was $commit (all commits are on a remote)"
     elif changes_are_in_base "$main" "$branch"; then
       git -C "$main" branch --quiet -D "$branch"
-      info "$(basename "$worktree"): removed; branch $branch deleted (its changes are in the default branch)"
+      info "$(basename "$worktree"): removed; branch $branch deleted, was $commit (its changes are in the default branch)"
     else
       info "$(basename "$worktree"): removed; branch $branch kept (it has changes that are not merged or pushed)"
     fi
