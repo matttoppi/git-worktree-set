@@ -20,3 +20,6 @@ shellcheck git-worktree-set test_git_worktree_set.sh
 ./test_git_worktree_set.sh
 BASH_UNDER_TEST=/bin/bash ./test_git_worktree_set.sh   # macOS: Bash 3.2
 ```
+
+After a change to removal, also run the comparison in `comparison/removal-safety/`
+(see its README) and update the results tables in both READMEs.

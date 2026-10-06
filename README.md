@@ -342,6 +342,29 @@ Before it removes anything, it checks every repository of the set, and it has
 no force option. It finds squash merges, and `remove --merged` is safe to run
 on a schedule.
 
+### Removal safety comparison
+
+[`comparison/removal-safety`](comparison/removal-safety) runs nine of these
+tools and `git-worktree-set` in Docker with the same mock repositories. Each
+case puts work at risk and then runs the normal remove command of the tool.
+
+| Tool | Cases with lost work | Cases with a half-removed workspace | Removed a worktree that another tool locked |
+|---|---|---|---|
+| git-worktree-set | 0 of 7 | 0 | no |
+| brunch | 0 of 6 | 2 | no |
+| wtp | 1 of 6 | 2 | no |
+| aw | 1 of 6 | 2 | no |
+| Orbit | 2 of 7 | 1 | no |
+| git-worktree-manager | 3 of 7 | 1 | no |
+| worktree-flow | 2 of 7 | 0 | yes |
+| Grove | 6 of 7 | 0 | yes |
+| spawnpoint | 5 of 6 | 0 | yes |
+| par | 5 of 6 | 0 | yes |
+| Plain Git, no tool (reference) | 1 of 6 | 4 | no |
+
+The comparison tests removal safety only. Other tools have more features. See
+its README for the method, the versions, and the limits.
+
 ## License
 
 MIT
