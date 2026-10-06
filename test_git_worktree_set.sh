@@ -167,6 +167,9 @@ worktree_set new cas-8 lambdas >/dev/null 2>&1
 git -C "$root/ui" worktree add -q --detach "$root/.worktrees/plain" >/dev/null 2>&1
 for set in "$root"/.worktrees/cas-[1567] "$root/.worktrees/plain"; do age_set "$set"; done
 touch -t 202001010000 "$root/.worktrees/cas-8" # only the set directory: its worktree is still active
+check "remove --merged --dry-run reports a set that it would remove" \
+  sh -c "'$shell' '$tool' remove --merged --dry-run 2>&1 | grep -q 'cas-7: would be removed'"
+check "remove --merged --dry-run removes nothing" test -e "$root/.worktrees/cas-7/ui/file.txt"
 check "remove --merged succeeds" worktree_set remove --merged
 check "remove --merged keeps a merged set that has a file that is not committed" test -e "$root/.worktrees/cas-5/lambdas/notes.txt"
 check "remove --merged keeps a pushed set that is not merged" test -e "$root/.worktrees/cas-6/ui/file.txt"
@@ -177,6 +180,11 @@ check "remove --merged keeps a set with Git activity in the last day" test -e "$
 age_set "$root/.worktrees/cas-8"
 (cd "$(dirname "$tool")" && GIT_WORKTREE_SET_ROOT=$root "$shell" "./$(basename "$tool")" remove --merged >/dev/null 2>&1)
 check "remove --merged, run by a relative path, removes the same set after one idle day" test ! -e "$root/.worktrees/cas-8"
+
+# --- remove --dry-run
+check "remove --dry-run succeeds for a set that remove would remove" worktree_set remove --dry-run cas-6
+check "remove --dry-run changes nothing" test -e "$root/.worktrees/cas-6/ui/file.txt"
+check "remove --dry-run fails for a set that remove would refuse" refuses worktree_set remove cas-5 --dry-run
 
 # --- a directory in .worktrees that is itself a worktree is not a set
 check "status marks a directory that is itself a worktree as not a set" \

@@ -98,7 +98,8 @@ git worktree-set remove <name>
 - `remove` refuses when a worktree has modified, staged, or untracked files, or when the set directory has unknown files. It removes nothing in that case. Report the listed items to the user. Commit or delete them only with the user's agreement.
 - `remove` deletes ignored files, as `git worktree remove` does. If you edited an ignored file such as `.env.local` in the set, tell the user before removal.
 - `remove` keeps a branch that has changes that are not pushed or merged. This is correct. Do not delete that branch.
-- For a cleanup of all finished sets, run `git worktree-set remove --merged`. It removes each set in which no branch has changes outside the default branch, with the same refusals, and keeps all other sets. It also keeps a set that had Git activity in the last day, and a set with a detached HEAD; use `remove <name>` for such a set. Run it only when the user asks. Report the removed sets and the kept sets.
+- To check before you remove, add `--dry-run`. It reports what `remove` or `remove --merged` would do and changes nothing.
+- For a cleanup of all finished sets, run `git worktree-set remove --merged --dry-run` first, then `git worktree-set remove --merged`. It removes each set in which no branch has changes outside the default branch, with the same refusals, and keeps all other sets. It also keeps a set that had Git activity in the last day, and a set with a detached HEAD; use `remove <name>` for such a set. Run it only when the user asks. Report the removed sets and the kept sets.
 - Never go around a refusal. Do not use `git worktree remove --force`, `git worktree unlock`, `git branch -D`, or `rm -rf` on a set. The lock on each worktree is deliberate.
 
 ## Report

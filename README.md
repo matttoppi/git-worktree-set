@@ -126,7 +126,7 @@ checked out, if another worktree has it. A directory in `.worktrees/` that is
 itself a worktree is not a set. `status` marks it, and `--porcelain` leaves it
 out.
 
-### `remove [<name>]`
+### `remove [--dry-run] [<name>]`
 
 `remove` checks every worktree first. It removes nothing if it finds one of
 these conditions:
@@ -166,7 +166,7 @@ git -C <root>/<repository> worktree remove --force --force <root>/.worktrees/<na
 git -C <root>/<repository> branch -D <name>
 ```
 
-### `remove --merged`
+### `remove --merged [--dry-run]`
 
 `remove --merged` fetches each repository, then removes each set in which a
 merge of every branch into the default branch changes nothing. The same
@@ -182,6 +182,13 @@ safe to run on a schedule. `remove <name>` has no such limit.
 
 `remove --merged` also keeps a set in which a worktree has a detached HEAD, and
 a directory in `.worktrees/` that is itself a worktree.
+
+### `--dry-run`
+
+`remove --dry-run <name>` and `remove --merged --dry-run` run all checks and
+report what the command would do. They change no worktree and no branch (they
+can fetch). `remove --dry-run <name>` exits with status 1 when `remove` would
+refuse.
 
 ### Scheduled cleanup
 

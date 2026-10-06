@@ -17,8 +17,8 @@ usage() {
 usage: git worktree-set new [--from <ref>] [--all] <name> [<repository>...]
        git worktree-set add <repository>...
        git worktree-set status [--porcelain] [<name>]
-       git worktree-set remove [<name>]
-       git worktree-set remove --merged
+       git worktree-set remove [--dry-run] [<name>]
+       git worktree-set remove --merged [--dry-run]
 
 new     Add one worktree for each repository at <root>/.worktrees/<name>/,
         all on branch <name>. Prints the directory of the set on stdout.
@@ -29,6 +29,7 @@ status  Show branch, changed files and commits that are on no remote.
 remove  Remove a set. Refuses if any work could be lost. Has no force option.
         --merged: remove each set that had no activity for one day and in
         which no branch has changes outside the default branch.
+        --dry-run: run all checks and report the result; change nothing.
 
 The default branch of a repository is the value of the Git configuration key
 worktree-set.defaultBranch, else the default branch of origin.
@@ -436,12 +437,18 @@ set_is_idle() {
 # Unlocks and prunes the worktree records of the set at $1 when its folder was
 # deleted without Git, for example with rm -rf. The files are gone, so the lock
 # protects nothing, and the records block `new` for the same name. Branches stay.
+# With $2 = true, it only reports.
 forget_deleted_set() {
-  local directory=$1 child path found=false
+  local directory=$1 dry_run=$2 child path found=false
   for child in "$root"/*/; do
     [ -e "$child.git" ] || continue
     while IFS= read -r path; do
       [ ! -e "$path" ] || continue
+      found=true
+      if $dry_run; then
+        info "$(basename "$child"): would remove the record of the deleted worktree $path"
+        continue
+      fi
       git -C "$child" worktree unlock "$path" 2>/dev/null || true
       git -C "$child" worktree prune
       info "$(basename "$child"): removed the record of the deleted worktree $path; its branch stays"
@@ -453,8 +460,18 @@ forget_deleted_set() {
 }
 
 cmd_remove() {
-  local name directory
-  if [ "${1:-}" = --merged ]; then
+  local name="" directory merged=false dry_run=false
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --merged) merged=true ;;
+      --dry-run) dry_run=true ;;
+      -*) die "unknown option '$1'" ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  if $merged; then
+    [ -z "$name" ] || die "remove --merged takes no name"
     cd "$root"
     for directory in "$root/$SET_DIRECTORY"/*/; do
       [ -d "$directory" ] || continue
@@ -467,18 +484,22 @@ cmd_remove() {
       elif set_is_merged "${directory%/}"; then
         info "$name:"
         # A separate process, so that a refusal stops only this removal.
-        GIT_WORKTREE_SET_ROOT=$root "$BASH" "$self" remove "$name" || true
+        if $dry_run; then
+          GIT_WORKTREE_SET_ROOT=$root "$BASH" "$self" remove --dry-run "$name" || true
+        else
+          GIT_WORKTREE_SET_ROOT=$root "$BASH" "$self" remove "$name" || true
+        fi
       else
         info "$name: kept (not merged)"
       fi
     done
     return
   fi
-  name=${1:-$(current_set)}
+  if [ -z "$name" ]; then name=$(current_set); fi
   [ -n "$name" ] || die "remove needs a name when the current directory is not in a set"
   directory=$(set_path "$name")
   if [ ! -d "$directory" ]; then
-    forget_deleted_set "$directory" || die "no worktree set at $directory"
+    forget_deleted_set "$directory" "$dry_run" || die "no worktree set at $directory"
     return
   fi
   [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set; use git worktree remove"
@@ -497,6 +518,10 @@ cmd_remove() {
     info "not part of a worktree: $entry"
   done < <(set_extra_entries unsafe "$directory")
   if $blocked; then die "nothing was removed; resolve the items above first"; fi
+  if $dry_run; then
+    info "$name: would be removed; nothing was changed"
+    return
+  fi
 
   # Leave the set before Git deletes the current directory.
   cd "$root"
