@@ -9,6 +9,9 @@ set -euo pipefail
 SET_DIRECTORY=.worktrees
 LOCK_REASON_PREFIX="git-worktree-set"
 SETUP_HOOK=.worktree-set-setup
+# The path of this script, usable after a change of directory.
+self=$0
+case $self in /*) ;; *) self=$PWD/$self ;; esac
 usage() {
   cat <<'EOF'
 usage: git worktree-set new [--from <ref>] [--all] <name> [<repository>...]
@@ -24,8 +27,11 @@ add     Inside a set: add more repositories to it.
 status  Show branch, changed files and commits that are on no remote.
         Without <name>: the set that contains the current directory, else all.
 remove  Remove a set. Refuses if any work could be lost. Has no force option.
-        --merged: remove each set that is at least one day old and in which
-        no branch has changes outside the default branch.
+        --merged: remove each set that had no activity for one day and in
+        which no branch has changes outside the default branch.
+
+The default branch of a repository is the value of the Git configuration key
+worktree-set.defaultBranch, else the default branch of origin.
 EOF
 }
 
@@ -97,16 +103,32 @@ set_worktrees() {
   done
 }
 
-base_ref() {
-  local main=$1 from=$2 ref
-  if [ -n "$from" ]; then
-    for ref in "origin/$from" "$from"; do
-      if git -C "$main" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
-        printf '%s' "$ref"
+# The ref for <name>: origin/<name>, or the local branch <name> when it
+# contains origin/<name> and has more commits. Any other commit-ish as it is.
+named_ref() {
+  local main=$1 name=$2
+  if git -C "$main" show-ref --verify --quiet "refs/remotes/origin/$name"; then
+    if git -C "$main" show-ref --verify --quiet "refs/heads/$name" &&
+      [ -n "$(git -C "$main" rev-list -1 "refs/remotes/origin/$name..refs/heads/$name")" ]; then
+      if git -C "$main" merge-base --is-ancestor "refs/remotes/origin/$name" "refs/heads/$name"; then
+        printf '%s' "$name"
         return
       fi
-    done
-    die "$(basename "$main"): cannot find '$from'"
+      info "warning: $(basename "$main"): local $name and origin/$name differ; using origin/$name"
+    fi
+    printf 'origin/%s' "$name"
+    return
+  fi
+  git -C "$main" rev-parse --verify --quiet "$name^{commit}" >/dev/null || return 1
+  printf '%s' "$name"
+}
+
+base_ref() {
+  local main=$1 from=$2 ref
+  if [ -z "$from" ]; then from=$(git -C "$main" config worktree-set.defaultBranch) || true; fi
+  if [ -n "$from" ]; then
+    named_ref "$main" "$from" || die "$(basename "$main"): cannot find '$from'"
+    return
   fi
   if ref=$(git -C "$main" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
     printf '%s' "$ref"
@@ -150,7 +172,7 @@ port_base() {
 }
 
 cmd_new() {
-  local from="" all=false
+  local from="" all=false arguments=()
   while [ $# -gt 0 ]; do
     case $1 in
       --from)
@@ -158,14 +180,27 @@ cmd_new() {
         from=$2
         shift 2
         ;;
+      --from=*)
+        from=${1#--from=}
+        shift
+        ;;
       --all)
         all=true
         shift
         ;;
+      --)
+        shift
+        arguments+=("$@")
+        break
+        ;;
       -*) die "unknown option '$1'" ;;
-      *) break ;;
+      *)
+        arguments+=("$1")
+        shift
+        ;;
     esac
   done
+  set -- ${arguments[@]+"${arguments[@]}"}
   [ $# -ge 1 ] || die "new needs a name"
   local name=$1
   shift
@@ -180,8 +215,9 @@ cmd_new() {
     for repository in "$@"; do repositories+=("${repository%/}"); done
   fi
 
-  local directory main target base
+  local directory main target base bases=() index=0
   directory=$(set_path "$name")
+  [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set"
 
   # Check everything before the first change.
   for repository in ${repositories[@]+"${repositories[@]}"}; do
@@ -195,18 +231,24 @@ cmd_new() {
     if git -C "$main" remote get-url origin >/dev/null 2>&1; then
       git -C "$main" fetch --quiet origin 2>/dev/null || info "warning: $repository: fetch failed, using local refs"
     fi
-    base_ref "$main" "$from" >/dev/null
+    base=$(base_ref "$main" "$from")
+    bases+=("$base")
   done
 
   mkdir -p "$directory"
   for repository in ${repositories[@]+"${repositories[@]}"}; do
     main=$root/$repository
     target=$directory/$repository
+    base=${bases[$index]}
+    index=$((index + 1))
     if git -C "$main" show-ref --verify --quiet "refs/heads/$name"; then
       git -C "$main" worktree add --quiet "$target" "$name" >&2
       info "$repository: existing branch $name"
+    elif git -C "$main" show-ref --verify --quiet "refs/remotes/origin/$name"; then
+      # Continue the pushed work, for example after `remove` deleted the local branch.
+      git -C "$main" worktree add --quiet --track -b "$name" "$target" "origin/$name" >&2
+      info "$repository: existing branch origin/$name"
     else
-      base=$(base_ref "$main" "$from")
       git -C "$main" worktree add --quiet --no-track -b "$name" "$target" "$base" >&2
       info "$repository: new branch $name from $base"
     fi
@@ -244,14 +286,18 @@ cmd_add() {
 }
 
 cmd_status() {
-  local porcelain=false
-  if [ "${1:-}" = --porcelain ]; then
-    porcelain=true
+  local porcelain=false name=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --porcelain) porcelain=true ;;
+      -*) die "unknown option '$1'" ;;
+      *) name=$1 ;;
+    esac
     shift
-  fi
-  local sets=() directory worktree branch changed unpushed summary
-  if [ $# -ge 1 ]; then
-    sets=("$(set_path "$1")")
+  done
+  local sets=() directory worktree branch changed unpushed summary location
+  if [ -n "$name" ]; then
+    sets=("$(set_path "$name")")
   elif [ -n "$(current_set)" ]; then
     sets=("$root/$SET_DIRECTORY/$(current_set)")
   else
@@ -263,9 +309,13 @@ cmd_status() {
   for directory in ${sets[@]+"${sets[@]}"}; do
     [ -d "$directory" ] || die "no worktree set at $directory"
     $porcelain || printf '%s  %s\n' "$(basename "$directory")" "$directory"
+    if [ -e "$directory/.git" ]; then
+      $porcelain || printf '  (a single worktree, not a set)\n'
+      continue
+    fi
     while IFS= read -r worktree; do
       branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD) || branch="(detached)"
-      changed=$(git -C "$worktree" status --porcelain | wc -l | tr -d ' ')
+      changed=$(git -C "$worktree" --no-optional-locks status --porcelain | wc -l | tr -d ' ')
       unpushed=$(git -C "$worktree" rev-list --count HEAD --not --remotes)
       if $porcelain; then
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -274,10 +324,27 @@ cmd_status() {
         summary=""
         if [ "$changed" != 0 ]; then summary="$changed changed"; fi
         if [ "$unpushed" != 0 ]; then summary="${summary:+$summary, }$unpushed on no remote"; fi
+        if [ "$branch" = "(detached)" ]; then
+          location=$(set_branch_location "$worktree")
+          if [ -n "$location" ]; then summary="${summary:+$summary, }$location"; fi
+        fi
         printf '  %-28s %-32s %s\n' "$(basename "$worktree")" "$branch" "${summary:-clean}"
       fi
     done < <(set_worktrees "$directory")
   done
+}
+
+# For a detached worktree at $1: where its set branch is checked out, if it is.
+# The set branch is in the lock reason.
+set_branch_location() {
+  local main lock branch
+  main=$(main_checkout "$1") || return 0
+  lock=$(lock_line "$main" "$1")
+  case $lock in "locked $LOCK_REASON_PREFIX: "*) ;; *) return 0 ;; esac
+  branch=${lock#"locked $LOCK_REASON_PREFIX: "}
+  git -C "$main" worktree list --porcelain | awk -v line="branch refs/heads/$branch" -v branch="$branch" '
+    /^worktree / { path = substr($0, 10) }
+    $0 == line { print branch " is checked out at " path }'
 }
 
 # The `locked` line of `git worktree list --porcelain` for the worktree at $2.
@@ -294,7 +361,7 @@ removal_blockers() {
     echo "not a usable worktree"
     return
   }
-  git -C "$worktree" status --porcelain | sed 's/^/not committed: /'
+  git -C "$worktree" --no-optional-locks status --porcelain | sed 's/^/not committed: /'
   if ! git -C "$worktree" symbolic-ref --quiet HEAD >/dev/null &&
     [ "$(git -C "$worktree" rev-list --count HEAD --not --branches --remotes --tags)" != 0 ]; then
     echo "detached HEAD has commits that are on no branch"
@@ -344,6 +411,19 @@ set_is_merged() {
   done < <(set_worktrees "$1")
 }
 
+# True if the set at $1 had no activity for one day. `new` and `add` change the
+# set directory. Git changes the index or the HEAD log of a worktree when it
+# sees or records work there. A change to a file inside a worktree does not
+# change the set directory.
+set_is_idle() {
+  local worktree git_directory
+  [ -n "$(find "$1" -maxdepth 0 -mmin +1440)" ] || return 1
+  while IFS= read -r worktree; do
+    git_directory=$(git -C "$worktree" rev-parse --absolute-git-dir) || return 1
+    [ -z "$(find "$git_directory/index" "$git_directory/logs/HEAD" -mmin -1440 2>/dev/null)" ] || return 1
+  done < <(set_worktrees "$1")
+}
+
 cmd_remove() {
   local name directory
   if [ "${1:-}" = --merged ]; then
@@ -352,15 +432,14 @@ cmd_remove() {
       [ -d "$directory" ] || continue
       name=$(basename "$directory")
       # A task can be about to start in a new set, which has no changes yet.
-      # The modification time of the directory is the last change of its members.
       if [ -e "$directory.git" ]; then
         info "$name: kept (a single worktree, not a set)"
-      elif [ -z "$(find "$directory" -maxdepth 0 -mmin +1440)" ]; then
-        info "$name: kept (less than one day old)"
+      elif ! set_is_idle "${directory%/}"; then
+        info "$name: kept (active in the last day)"
       elif set_is_merged "${directory%/}"; then
         info "$name:"
         # A separate process, so that a refusal stops only this removal.
-        GIT_WORKTREE_SET_ROOT=$root "$BASH" "$0" remove "$name" || true
+        GIT_WORKTREE_SET_ROOT=$root "$BASH" "$self" remove "$name" || true
       else
         info "$name: kept (not merged)"
       fi
@@ -371,6 +450,7 @@ cmd_remove() {
   [ -n "$name" ] || die "remove needs a name when the current directory is not in a set"
   directory=$(set_path "$name")
   [ -d "$directory" ] || die "no worktree set at $directory"
+  [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set; use git worktree remove"
 
   local blocked=false worktree blockers entry
   while IFS= read -r worktree; do

@@ -29,6 +29,17 @@ check() { # check <description> <command...>
 
 refuses() { ! "$@"; }
 
+# Make the set at $1 look idle for more than one day: the set directory, and the
+# index and HEAD log of each worktree in it.
+age_set() {
+  local worktree git_directory
+  touch -t 202001010000 "$1"
+  for worktree in "$1"/*/; do
+    git_directory=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || continue
+    touch -c -t 202001010000 "$git_directory/index" "$git_directory/logs/HEAD"
+  done
+}
+
 for repository in ui bridge lambdas; do
   git init -q --bare -b main "$sandbox/remotes/$repository.git"
   git clone -q "$sandbox/remotes/$repository.git" "$root/$repository" 2>/dev/null
@@ -110,9 +121,20 @@ check "a branch with no commits of its own is deleted" refuses git -C "$root/ui"
 check "a pushed branch is deleted locally" refuses git -C "$root/lambdas" show-ref --verify --quiet refs/heads/cas-1
 check "the main checkout and its ignored file are not touched" test "$(cat "$root/ui/.env.local")" = SECRET=1
 
-# --- new again resumes the kept branch
-worktree_set new cas-1 bridge >/dev/null 2>&1
+# --- new again resumes the kept branch, and the pushed branch that remove deleted
+worktree_set new cas-1 bridge lambdas >/dev/null 2>&1
 check "new on a kept branch resumes its commits" test "$(git -C "$set_directory/bridge" log -1 --format=%s)" = "local only"
+check "new on a branch that is only on origin resumes its commits" test "$(git -C "$set_directory/lambdas" log -1 --format=%s)" = "pushed"
+
+# --- --from uses the local branch when it is ahead of origin, and options can follow the name
+git -C "$root/ui" branch -q release origin/main
+git -C "$root/ui" push -q origin release 2>/dev/null
+git -C "$root/ui" branch -qf release "$(git -C "$root/ui" commit-tree -p release -m "local release work" "release^{tree}")"
+output=$(worktree_set new cas-2 ui --from release 2>/dev/null)
+check "an option after the name and the repositories is accepted" test "$output" = "$root/.worktrees/cas-2"
+check "--from uses the local branch when it contains origin and has more commits" \
+  test "$(git -C "$output/ui" log -1 --format=%s)" = "local release work"
+worktree_set remove cas-2 >/dev/null 2>&1
 
 # --- branch names with a slash
 output=$(worktree_set new --from main feature/cas-3 ui 2>/dev/null)
@@ -143,17 +165,46 @@ worktree_set new cas-7 ui lambdas >/dev/null 2>&1
 (cd "$root/ui" && git checkout -q --detach origin/main && git merge -q --squash cas-7 >/dev/null 2>&1 && git commit -qm "squash of cas-7" && git push -q origin HEAD:main && git checkout -q main)
 worktree_set new cas-8 lambdas >/dev/null 2>&1
 git -C "$root/ui" worktree add -q --detach "$root/.worktrees/plain" >/dev/null 2>&1
-touch -t 202001010000 "$root"/.worktrees/cas-[1567] "$root/.worktrees/plain"
+for set in "$root"/.worktrees/cas-[1567] "$root/.worktrees/plain"; do age_set "$set"; done
+touch -t 202001010000 "$root/.worktrees/cas-8" # only the set directory: its worktree is still active
 check "remove --merged succeeds" worktree_set remove --merged
 check "remove --merged keeps a merged set that has a file that is not committed" test -e "$root/.worktrees/cas-5/lambdas/notes.txt"
 check "remove --merged keeps a pushed set that is not merged" test -e "$root/.worktrees/cas-6/ui/file.txt"
 check "remove --merged removes a merged set after an earlier refusal" test ! -e "$root/.worktrees/cas-7"
 check "remove --merged keeps a set with a commit on no remote" test -e "$root/.worktrees/cas-1/bridge/file.txt"
 check "remove --merged keeps a directory that is itself a worktree" test -e "$root/.worktrees/plain/file.txt"
-check "remove --merged keeps a set that is less than one day old" test -e "$root/.worktrees/cas-8/lambdas/file.txt"
-touch -t 202001010000 "$root/.worktrees/cas-8"
+check "remove --merged keeps a set with Git activity in the last day" test -e "$root/.worktrees/cas-8/lambdas/file.txt"
+age_set "$root/.worktrees/cas-8"
+(cd "$(dirname "$tool")" && GIT_WORKTREE_SET_ROOT=$root "$shell" "./$(basename "$tool")" remove --merged >/dev/null 2>&1)
+check "remove --merged, run by a relative path, removes the same set after one idle day" test ! -e "$root/.worktrees/cas-8"
+
+# --- a directory in .worktrees that is itself a worktree is not a set
+check "status marks a directory that is itself a worktree as not a set" \
+  sh -c "'$shell' '$tool' status plain | grep -q 'a single worktree, not a set'"
+check "new refuses to add to a directory that is itself a worktree" refuses worktree_set new plain bridge
+check "remove refuses a directory that is itself a worktree" refuses worktree_set remove plain
+
+# --- status tells where the branch of a detached set worktree is checked out
+detached=$(worktree_set new cas-9 bridge 2>/dev/null)
+git -C "$detached/bridge" switch -q --detach
+git -C "$root/bridge" switch -q cas-9
+check "status shows where the branch of a detached worktree is checked out" \
+  sh -c "'$shell' '$tool' status cas-9 | grep -qF 'cas-9 is checked out at $root/bridge'"
+git -C "$root/bridge" switch -q main
+worktree_set remove cas-9 >/dev/null 2>&1
+
+# --- a repository can name its default branch
+git -C "$root/bridge" branch -q integration origin/main
+git -C "$root/bridge" config worktree-set.defaultBranch integration
+integration=$(worktree_set new cas-10 bridge 2>/dev/null)
+(cd "$integration/bridge" && echo integrated >>file.txt && git commit -qam "integrated work")
+git -C "$root/bridge" branch -qf integration cas-10
+age_set "$integration"
 worktree_set remove --merged >/dev/null 2>&1
-check "remove --merged removes the same set when it is one day old" test ! -e "$root/.worktrees/cas-8"
+check "remove --merged removes a set that is merged into the configured default branch" test ! -e "$integration"
+output=$(worktree_set new cas-11 bridge 2>/dev/null)
+check "new starts from the configured default branch" test "$(git -C "$output/bridge" log -1 --format=%s)" = "integrated work"
+git -C "$root/bridge" config --unset worktree-set.defaultBranch
 
 # --- root discovery does not go above the directory that holds the repositories
 check "a directory above the root is not taken as a root" sh -c "cd '$sandbox' && ! '$shell' '$tool' status"
