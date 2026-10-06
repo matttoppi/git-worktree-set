@@ -154,6 +154,10 @@ two cases only:
 
 In all other cases the branch stays, and `new <name>` continues from it.
 
+If you deleted a set folder without Git, for example with `rm -rf`, Git keeps a
+locked record of each worktree, and `new <name>` refuses. `remove <name>` then
+unlocks and prunes these records. The branches stay.
+
 To discard a set on purpose, use Git directly. `--force` twice removes a
 locked worktree with its changes:
 

@@ -226,7 +226,8 @@ cmd_new() {
     [ -e "$main/.git" ] || die "'$repository' is not a repository in $root"
     [ ! -e "$directory/$repository" ] || die "$directory/$repository exists already"
     if git -C "$main" worktree list --porcelain | grep -qxF "branch refs/heads/$name"; then
-      die "$repository: branch '$name' is checked out in another worktree"
+      die "$repository: branch '$name' is checked out in another worktree" \
+        "(if you deleted a set folder by hand, run: git worktree-set remove $name)"
     fi
     if git -C "$main" remote get-url origin >/dev/null 2>&1; then
       git -C "$main" fetch --quiet origin 2>/dev/null || info "warning: $repository: fetch failed, using local refs"
@@ -424,6 +425,25 @@ set_is_idle() {
   done < <(set_worktrees "$1")
 }
 
+# Unlocks and prunes the worktree records of the set at $1 when its folder was
+# deleted without Git, for example with rm -rf. The files are gone, so the lock
+# protects nothing, and the records block `new` for the same name. Branches stay.
+forget_deleted_set() {
+  local directory=$1 child path found=false
+  for child in "$root"/*/; do
+    [ -e "$child.git" ] || continue
+    while IFS= read -r path; do
+      [ ! -e "$path" ] || continue
+      git -C "$child" worktree unlock "$path" 2>/dev/null || true
+      git -C "$child" worktree prune
+      info "$(basename "$child"): removed the record of the deleted worktree $path; its branch stays"
+      found=true
+    done < <(git -C "$child" worktree list --porcelain |
+      awk -v prefix="worktree $directory/" 'index($0, prefix) == 1 { print substr($0, 10) }')
+  done
+  $found
+}
+
 cmd_remove() {
   local name directory
   if [ "${1:-}" = --merged ]; then
@@ -449,7 +469,10 @@ cmd_remove() {
   name=${1:-$(current_set)}
   [ -n "$name" ] || die "remove needs a name when the current directory is not in a set"
   directory=$(set_path "$name")
-  [ -d "$directory" ] || die "no worktree set at $directory"
+  if [ ! -d "$directory" ]; then
+    forget_deleted_set "$directory" || die "no worktree set at $directory"
+    return
+  fi
   [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set; use git worktree remove"
 
   local blocked=false worktree blockers entry
