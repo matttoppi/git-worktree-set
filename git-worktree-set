@@ -215,7 +215,7 @@ cmd_new() {
     for repository in "$@"; do repositories+=("${repository%/}"); done
   fi
 
-  local directory main target base bases=() index=0
+  local directory main target base bases=() index=0 lock=()
   directory=$(set_path "$name")
   [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set"
 
@@ -241,19 +241,19 @@ cmd_new() {
     target=$directory/$repository
     base=${bases[$index]}
     index=$((index + 1))
+    # The lock makes `git worktree remove --force` and `git worktree prune` refuse.
+    lock=(--lock --reason "$LOCK_REASON_PREFIX: $name")
     if git -C "$main" show-ref --verify --quiet "refs/heads/$name"; then
-      git -C "$main" worktree add --quiet "$target" "$name" >&2
+      git -C "$main" worktree add --quiet "${lock[@]}" "$target" "$name" >&2
       info "$repository: existing branch $name"
     elif git -C "$main" show-ref --verify --quiet "refs/remotes/origin/$name"; then
       # Continue the pushed work, for example after `remove` deleted the local branch.
-      git -C "$main" worktree add --quiet --track -b "$name" "$target" "origin/$name" >&2
+      git -C "$main" worktree add --quiet "${lock[@]}" --track -b "$name" "$target" "origin/$name" >&2
       info "$repository: existing branch origin/$name"
     else
-      git -C "$main" worktree add --quiet --no-track -b "$name" "$target" "$base" >&2
+      git -C "$main" worktree add --quiet "${lock[@]}" --no-track -b "$name" "$target" "$base" >&2
       info "$repository: new branch $name from $base"
     fi
-    # The lock makes `git worktree remove --force` and `git worktree prune` refuse.
-    git -C "$main" worktree lock --reason "$LOCK_REASON_PREFIX: $name" "$target"
     copy_included "$main" "$target"
   done
 

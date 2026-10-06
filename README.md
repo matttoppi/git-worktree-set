@@ -188,13 +188,15 @@ configuration, as `git maintenance` does with `maintenance.repo`:
 git config --global --add worktree-set.root /path/to/root
 ```
 
-Then let the scheduler of the system (`launchd`, `cron`, a systemd timer) run:
+Then let the scheduler of the system (`launchd`, `cron`, a systemd timer) run
+`git for-each-repo`, which runs the command in each root:
 
 ```sh
-git config --global --get-all worktree-set.root | while IFS= read -r root; do
-  GIT_WORKTREE_SET_ROOT="$root" git-worktree-set remove --merged </dev/null
-done
+git for-each-repo --config=worktree-set.root --keep-going worktree-set remove --merged </dev/null
 ```
+
+`--keep-going` needs Git 2.46 or later. Without it, the first failure stops the
+other roots.
 
 ## Files that worktrees do not have
 
@@ -214,7 +216,9 @@ copy cannot become a change in the worktree.
 If `<root>/.worktree-set-setup` is executable, `new` runs it one time in the
 set directory. Use it to install dependencies, assign ports, or link files.
 The hook is optional. If it fails, `new` prints a warning and the set is still
-usable.
+usable. For setup that belongs to one repository, you can use a `post-checkout`
+hook in that repository instead: Git runs it when `git worktree add` makes a
+worktree. Use the set hook for setup that applies to the set, such as ports.
 
 | Variable | Value |
 |---|---|
@@ -313,15 +317,26 @@ The workflow in `.github/workflows/test.yml` runs the tests on Linux and macOS.
 
 ## Related tools
 
-- worktrunk and gwq manage the worktrees of one repository.
-- Conductor and the Codex app make worktrees for agents, one repository at a
-  time.
-- worktree-flow, brunch, and qdpi make worktrees across several repositories.
-- mani and repo run commands across many repositories. They do not make
-  worktrees.
+- Several tools also make one workspace with a worktree for each repository:
+  [Grove](https://github.com/nicksenap/grove),
+  [Orbit](https://github.com/orbcli/orbit),
+  [worktree-flow](https://github.com/simonpratt/worktree-flow),
+  [git-worktree-manager](https://github.com/nanasess/git-worktree-manager),
+  [spawnpoint](https://github.com/mihirgupta0900/spawnpoint),
+  [par](https://github.com/coplane/par), and
+  [Vibe Kanban](https://github.com/BloopAI/vibe-kanban).
+- [worktrunk](https://github.com/max-sixty/worktrunk),
+  [gwq](https://github.com/d-kuro/gwq), Claude Code, the Codex app, and
+  Conductor make worktrees for one repository at a time.
+- [mani](https://github.com/alajmo/mani), [gita](https://github.com/nosarthur/gita),
+  and [repo](https://gerrit.googlesource.com/git-repo) run commands across many
+  repositories. They do not make a worktree for each task.
 
-`git-worktree-set` keeps no state outside Git, refuses each removal that can
-lose work, and leaves a layout that plain Git commands and agents can use.
+`git-worktree-set` differs in its removal model and in what it does not have.
+It keeps no state file and needs no configuration. It locks each worktree.
+Before it removes anything, it checks every repository of the set, and it has
+no force option. It finds squash merges, and `remove --merged` is safe to run
+on a schedule.
 
 ## License
 
