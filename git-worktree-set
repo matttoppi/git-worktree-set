@@ -603,7 +603,7 @@ landing_plan() {
     printf 'blocked\tno target branch; use --into <branch>, or set worktree-set.defaultBranch\n'
     return
   fi
-  case $target in
+  case $(printf '%s' "$target" | tr '[:upper:]' '[:lower:]') in # a case-insensitive file system matches Main to main
     main | master | dev | prod)
       printf 'blocked\tland refuses %s; main, master, dev, and prod need a reviewed promotion\n' "$target"
       return
@@ -729,7 +729,7 @@ cmd_land() {
       continue
     fi
     if [ -n "$checkout" ]; then
-      GIT_REFLOG_ACTION="worktree-set land $name" git -C "$checkout" merge --ff-only --quiet "$new" >&2 ||
+      GIT_REFLOG_ACTION="worktree-set land $name" git -C "$checkout" merge --ff-only --no-squash --quiet "$new" >&2 ||
         die "$repository: Git refused to update $checkout; the repositories above are landed, the others are not. Correct the cause and run land again"
     else
       git -C "$worktree" update-ref -m "worktree-set land $name" "refs/heads/$target" "$new" "$old" ||

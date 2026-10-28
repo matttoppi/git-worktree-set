@@ -272,6 +272,7 @@ check "land --dry-run succeeds and prints what it would do in each repository" \
 exit 0"
 check "land --dry-run moves no branch" test "$(git -C "$root/ui" rev-parse golden-hour) $(git -C "$root/bridge" rev-parse golden-hour)" = "$ui_target $bridge_target"
 check "land refuses main" fails_with "land refuses main" worktree_set land --into main cas-20
+check "land refuses Main, which is main on a case-insensitive file system" fails_with "land refuses Main" worktree_set land --into Main cas-20
 echo draft >"$landing/ui/draft.txt"
 check "land refuses a worktree with a file that is not committed" fails_with "not committed: ?? draft.txt" worktree_set land --into golden-hour cas-20
 check "after that refusal no repository of the set is landed" test "$(git -C "$root/bridge" rev-parse golden-hour)" = "$bridge_target"
