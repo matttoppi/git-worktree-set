@@ -17,6 +17,7 @@ monorepo, submodules, or a state file.
 git worktree-set new cas-123 api web    # create the set; prints its directory
 git worktree-set add lambdas            # inside the set: add a repository later
 git worktree-set status                 # branch, changed files, commits on no remote
+git worktree-set land --into integration cas-123   # merge each branch into a local branch
 git worktree-set remove cas-123         # refuses if any work could be lost
 git worktree-set remove --merged        # remove each set that is merged
 ```
@@ -105,7 +106,8 @@ git -C web config worktree-set.defaultBranch dev
 ```
 
 `new` starts new branches from the default branch. `remove` and
-`remove --merged` compare each branch with it.
+`remove --merged` compare each branch with it. `land` without `--into` merges
+into the local branch that `worktree-set.defaultBranch` names.
 
 ### `add <repository>...`
 
@@ -183,12 +185,62 @@ safe to run on a schedule. `remove <name>` has no such limit.
 `remove --merged` also keeps a set in which a worktree has a detached HEAD, and
 a directory in `.worktrees/` that is itself a worktree.
 
+### `land [--into <branch>] [--dry-run] [<name>]`
+
+`land` merges the branch of each worktree of a set into a local branch, for
+example an integration branch that you run and test in your main checkouts.
+The target is `--into <branch>`, else the branch that
+`worktree-set.defaultBranch` names in each repository. Without a name, `land`
+uses the set that contains the current directory.
+
+`land` checks every worktree first. It changes nothing if it finds one of
+these conditions:
+
+| Condition | Why |
+|---|---|
+| A modified, staged, or untracked file in a worktree | The work is not committed. |
+| A detached HEAD | The branch of the set is not checked out. |
+| No target, or no local branch with that name | A typing error must not make a branch. |
+| The target is `main`, `master`, `dev`, or `prod` | These need a reviewed promotion, for example a pull request. |
+| A merge conflict | A person resolves it in the set. |
+| A change in the checkout of the target that the landing would overwrite | `git merge` refuses this too. |
+
+Then, for each repository:
+
+1. If a merge of the set branch into the target changes nothing, `land`
+   changes nothing. Thus a second `land` of the same set is safe.
+2. If the set branch contains the target, the target fast-forwards to it.
+   Else `land` makes the merge commit "Merge branch '<branch>' into <target>"
+   with `git merge-tree` and `git commit-tree`, outside all worktrees.
+3. If a worktree has the target checked out, usually the main checkout, `land`
+   fast-forwards it there, so its files change. Other changes in that checkout
+   stay. Else `land` moves the branch with `git update-ref`, which fails if the
+   branch moved after the checks.
+4. It checks that a merge of the set branch into the target changes nothing,
+   and prints one line:
+
+```text
+api: landed in integration as 9f8e7d6, a merge commit on 1a2b3c4 with 3 commits
+web: landed in integration as 5d6e7f8, a fast-forward from 0c1d2e3 with 2 commits; updated the checkout at /dev/platform/web
+lambdas: already in integration; nothing changed
+```
+
+`land` does not fetch and does not push. Push the target yourself when you
+want to publish it.
+
+In auto mode, Claude Code can deny a merge into a shared branch. A narrow
+allow rule approves the command before the auto mode classifier sees it:
+
+```json
+{ "permissions": { "allow": ["Bash(git worktree-set land *)"] } }
+```
+
 ### `--dry-run`
 
-`remove --dry-run <name>` and `remove --merged --dry-run` run all checks and
-report what the command would do. They change no worktree and no branch (they
-can fetch). `remove --dry-run <name>` exits with status 1 when `remove` would
-refuse.
+`remove --dry-run <name>`, `remove --merged --dry-run`, and `land --dry-run`
+run all checks and report what the command would do. They change no worktree
+and no branch (`remove` can fetch). `remove --dry-run <name>` and
+`land --dry-run` exit with status 1 when the command would refuse.
 
 ### Scheduled cleanup
 
@@ -324,6 +376,9 @@ The workflow in `.github/workflows/test.yml` runs the tests on Linux and macOS.
 - If Git refuses to remove a worktree after all checks pass, `remove` stops.
   The worktrees that it removed before stay removed, and the others stay.
   Correct the cause and run `remove` again.
+- If Git refuses to move a target after all checks pass, `land` stops. The
+  repositories that it landed before stay landed. Correct the cause and run
+  `land` again.
 - Windows is not tested.
 
 ## Related tools

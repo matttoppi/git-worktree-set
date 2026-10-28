@@ -29,6 +29,13 @@ check() { # check <description> <command...>
 
 refuses() { ! "$@"; }
 
+# fails_with <text> <command...>: the command fails and its output contains the text.
+fails_with() {
+  local text=$1 output
+  shift
+  ! output=$("$@" 2>&1) && printf '%s\n' "$output" | grep -qF -- "$text"
+}
+
 # Make the set at $1 look idle for more than one day: the set directory, and the
 # index and HEAD log of each worktree in it.
 age_set() {
@@ -246,6 +253,74 @@ mv "$root/.worktree-set-setup.saved" "$root/.worktree-set-setup"
 
 # --- root discovery does not go above the directory that holds the repositories
 check "a directory above the root is not taken as a root" sh -c "cd '$sandbox' && ! '$shell' '$tool' status"
+
+# --- land: ui has golden-hour checked out in its main checkout; in bridge,
+# golden-hour is checked out nowhere and gets a commit after the set starts.
+for repository in ui bridge; do git -C "$root/$repository" branch -q golden-hour origin/main; done
+git -C "$root/ui" push -q origin golden-hour 2>/dev/null
+git -C "$root/ui" switch -q golden-hour
+landing=$(worktree_set new --from golden-hour cas-20 ui bridge 2>/dev/null)
+(cd "$landing/ui" && echo landed-ui >>file.txt && git commit -qam "ui work")
+(cd "$landing/bridge" && echo landed-bridge >new.txt && git add new.txt && git commit -qm "bridge work")
+git -C "$root/bridge" branch -qf golden-hour "$(git -C "$root/bridge" commit-tree -p golden-hour -m "other landing" "golden-hour^{tree}")"
+ui_target=$(git -C "$root/ui" rev-parse golden-hour)
+bridge_target=$(git -C "$root/bridge" rev-parse golden-hour)
+expected="bridge: would land in golden-hour as a merge commit on $(git -C "$root/bridge" rev-parse --short golden-hour) with 1 commit
+ui: would land in golden-hour as a fast-forward from $(git -C "$root/ui" rev-parse --short golden-hour) with 1 commit; would update the checkout at $root/ui"
+check "land --dry-run succeeds and prints what it would do in each repository" \
+  test "$(worktree_set land --into golden-hour --dry-run cas-20 2>/dev/null; echo "exit $?")" = "$expected
+exit 0"
+check "land --dry-run moves no branch" test "$(git -C "$root/ui" rev-parse golden-hour) $(git -C "$root/bridge" rev-parse golden-hour)" = "$ui_target $bridge_target"
+check "land refuses main" fails_with "land refuses main" worktree_set land --into main cas-20
+echo draft >"$landing/ui/draft.txt"
+check "land refuses a worktree with a file that is not committed" fails_with "not committed: ?? draft.txt" worktree_set land --into golden-hour cas-20
+check "after that refusal no repository of the set is landed" test "$(git -C "$root/bridge" rev-parse golden-hour)" = "$bridge_target"
+rm "$landing/ui/draft.txt"
+echo local >>"$root/ui/file.txt"
+check "land refuses a change in the target checkout that the landing would overwrite" \
+  fails_with "the checkout at $root/ui: Entry 'file.txt' not uptodate" worktree_set land --into golden-hour cas-20
+git -C "$root/ui" checkout -q file.txt
+echo note >"$root/ui/notes.txt"
+output=$(worktree_set land --into golden-hour cas-20 2>/dev/null; echo "exit $?")
+check "land fast-forwards a target that the set branch contains" test "$(git -C "$root/ui" rev-parse golden-hour)" = "$(git -C "$landing/ui" rev-parse HEAD)"
+check "land updates the files of the checkout that has the target branch" test "$(tail -n 1 "$root/ui/file.txt")" = landed-ui
+check "land keeps a change in that checkout that the landing does not touch" test "$(cat "$root/ui/notes.txt")" = note
+check "land makes a merge commit when the target has commits that the set branch does not have" \
+  test "$(git -C "$root/bridge" log -1 --format='%s %P' golden-hour)" = "Merge branch 'cas-20' into golden-hour $bridge_target $(git -C "$landing/bridge" rev-parse HEAD)"
+check "land leaves the files of a main checkout on another branch" test ! -e "$root/bridge/new.txt"
+expected="bridge: landed in golden-hour as $(git -C "$root/bridge" rev-parse --short golden-hour), a merge commit on $(git -C "$root/bridge" rev-parse --short "$bridge_target") with 1 commit
+ui: landed in golden-hour as $(git -C "$root/ui" rev-parse --short golden-hour), a fast-forward from $(git -C "$root/ui" rev-parse --short "$ui_target") with 1 commit; updated the checkout at $root/ui
+exit 0"
+check "land succeeds and prints one result line for each repository" test "$output" = "$expected"
+check "land pushes nothing" test "$(git -C "$sandbox/remotes/ui.git" rev-parse golden-hour)" = "$ui_target"
+ui_target=$(git -C "$root/ui" rev-parse golden-hour)
+bridge_target=$(git -C "$root/bridge" rev-parse golden-hour)
+check "land of a set that is landed changes nothing and says so" \
+  test "$(worktree_set land --into golden-hour cas-20 2>/dev/null; echo "exit $?")" = "bridge: already in golden-hour; nothing changed
+ui: already in golden-hour; nothing changed
+exit 0"
+check "after that land no branch moved" test "$(git -C "$root/ui" rev-parse golden-hour) $(git -C "$root/bridge" rev-parse golden-hour)" = "$ui_target $bridge_target"
+conflict=$(worktree_set new --from golden-hour cas-21 ui 2>/dev/null)
+(cd "$conflict/ui" && echo set-side >file.txt && git commit -qam "set side")
+(cd "$root/ui" && echo target-side >file.txt && git commit -qam "target side")
+check "land refuses a merge with a conflict" fails_with "merge conflict with golden-hour: file.txt" worktree_set land --into golden-hour cas-21
+worktree_set new cas-22 lambdas >/dev/null 2>&1
+check "land refuses a repository that has no local target branch" fails_with "no local branch golden-hour" worktree_set land --into golden-hour cas-22
+git -C "$root/bridge" config worktree-set.defaultBranch golden-hour
+configured=$(worktree_set new cas-23 bridge 2>/dev/null)
+(cd "$configured/bridge" && echo configured >>file.txt && git commit -qam "configured work")
+check "land without --into, from inside the set, lands into the configured default branch" \
+  sh -c "cd '$configured/bridge' && '$shell' '$tool' land && test \"\$(git log -1 --format=%s golden-hour)\" = 'configured work'"
+git -C "$root/bridge" config --unset worktree-set.defaultBranch
+split=$(worktree_set new --from golden-hour cas-24 bridge 2>/dev/null)
+(cd "$split/bridge" && mkdir directory && echo x >directory/x.txt && echo y >directory/y.txt && git add directory && git commit -qm "add a directory")
+worktree_set land --into golden-hour cas-24 >/dev/null 2>&1
+added=$(worktree_set new --from golden-hour cas-25 bridge 2>/dev/null)
+(cd "$added/bridge" && echo z >directory/z.txt && git add directory && git commit -qm "add a file to the directory")
+worktree_set land --into golden-hour cas-25 >/dev/null 2>&1
+(cd "$split/bridge" && mkdir one two && git mv directory/x.txt one/ && git mv directory/y.txt two/ && git commit -qm "split the directory")
+check "land refuses a conflict that names no file (a directory rename split)" \
+  fails_with "merge conflict with golden-hour" worktree_set land --into golden-hour cas-24
 
 if [ "$failures" -eq 0 ]; then
   echo "all tests passed"

@@ -19,6 +19,7 @@ usage: git worktree-set new [--from <ref>] [--all] <name> [<repository>...]
        git worktree-set status [--porcelain] [<name>]
        git worktree-set remove [--dry-run] [<name>]
        git worktree-set remove --merged [--dry-run]
+       git worktree-set land [--into <branch>] [--dry-run] [<name>]
 
 new     Add one worktree for each repository at <root>/.worktrees/<name>/,
         all on branch <name>. Prints the directory of the set on stdout.
@@ -30,6 +31,12 @@ remove  Remove a set. Refuses if any work could be lost. Has no force option.
         --merged: remove each set that had no activity for one day and in
         which no branch has changes outside the default branch.
         --dry-run: run all checks and report the result; change nothing.
+land    Merge the branch of each worktree of a set into a local branch, such
+        as an integration branch: --into <branch>, else the default branch
+        that worktree-set.defaultBranch sets. Checks all worktrees first and
+        changes nothing if one check fails. Fast-forwards when it can, else
+        makes a merge commit. Updates the checkout that has the branch.
+        Refuses main, master, dev, and prod. Never pushes.
 
 The default branch of a repository is the value of the Git configuration key
 worktree-set.defaultBranch, else the default branch of origin.
@@ -339,14 +346,20 @@ cmd_status() {
 # For a detached worktree at $1: where its set branch is checked out, if it is.
 # The set branch is in the lock reason.
 set_branch_location() {
-  local main lock branch
+  local main lock branch path
   main=$(main_checkout "$1") || return 0
   lock=$(lock_line "$main" "$1")
   case $lock in "locked $LOCK_REASON_PREFIX: "*) ;; *) return 0 ;; esac
   branch=${lock#"locked $LOCK_REASON_PREFIX: "}
-  git -C "$main" worktree list --porcelain | awk -v line="branch refs/heads/$branch" -v branch="$branch" '
+  path=$(branch_checkout "$main" "$branch")
+  if [ -n "$path" ]; then printf '%s is checked out at %s\n' "$branch" "$path"; fi
+}
+
+# The worktree that has branch $2 checked out, if any.
+branch_checkout() {
+  git -C "$1" worktree list --porcelain | awk -v line="branch refs/heads/$2" '
     /^worktree / { path = substr($0, 10) }
-    $0 == line { print branch " is checked out at " path }'
+    $0 == line { print path }'
 }
 
 # The `locked` line of `git worktree list --porcelain` for the worktree at $2.
@@ -399,11 +412,11 @@ set_extra_entries() {
   done
 }
 
-# True if a merge of branch $2 into the default branch changes nothing. This
-# finds a branch that was merged with a squash or a rebase.
+# True if a merge of branch $2 into branch $3, else into the default branch,
+# changes nothing. This finds a branch that was merged with a squash or a rebase.
 changes_are_in_base() {
-  local main=$1 branch=$2 base merged
-  base=$(base_ref "$main" "")
+  local main=$1 branch=$2 base=${3:-} merged
+  if [ -z "$base" ]; then base=$(base_ref "$main" ""); fi
   merged=$(git -C "$main" merge-tree --write-tree "$base" "$branch" 2>/dev/null) || return 1
   [ "$merged" = "$(git -C "$main" rev-parse "$base^{tree}")" ]
 }
@@ -571,8 +584,167 @@ cmd_remove() {
   rmdir "$root/$SET_DIRECTORY" 2>/dev/null || true
 }
 
+# Plans the landing of the worktree at $1 into branch $2, else into the
+# default branch that worktree-set.defaultBranch sets. Prints one line with tab
+# separators: action, target branch, target commit before, target commit after,
+# head of the worktree, and the checkout that has the target branch, if any.
+# The action is "landed" (the changes are in the target already),
+# "fast-forward", or "merge". If the landing cannot go ahead, it prints
+# "blocked" and a reason instead, one line for each reason.
+# Moves no branch and changes no worktree. It can write Git objects, and it
+# refreshes the index of the target checkout as git status does.
+landing_plan() {
+  local worktree=$1 target=$2 branch status head old new action output result checkout pending
+  if ! branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD); then
+    printf 'blocked\tdetached HEAD; check out the branch of the set\n'
+    return
+  fi
+  if [ -z "$target" ] && ! target=$(git -C "$worktree" config worktree-set.defaultBranch); then
+    printf 'blocked\tno target branch; use --into <branch>, or set worktree-set.defaultBranch\n'
+    return
+  fi
+  case $target in
+    main | master | dev | prod)
+      printf 'blocked\tland refuses %s; main, master, dev, and prod need a reviewed promotion\n' "$target"
+      return
+      ;;
+  esac
+  if [ "$target" = "$branch" ]; then
+    printf 'blocked\t%s is the branch of the set\n' "$target"
+    return
+  fi
+  if ! old=$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$target"); then
+    printf 'blocked\tno local branch %s\n' "$target"
+    return
+  fi
+  if ! status=$(git -C "$worktree" --no-optional-locks status --porcelain); then
+    printf 'blocked\tgit status failed\n'
+    return
+  fi
+  if [ -n "$status" ]; then
+    printf '%s\n' "$status" | awk '{ print "blocked\tnot committed: " $0 }'
+    return
+  fi
+  head=$(git -C "$worktree" rev-parse HEAD)
+  if changes_are_in_base "$worktree" "$head" "$old"; then
+    printf 'landed\t%s\t%s\t%s\t%s\t\n' "$target" "$old" "$old" "$head"
+    return
+  fi
+
+  if git -C "$worktree" merge-base --is-ancestor "$old" "$head"; then
+    action=fast-forward
+    new=$head
+  else
+    output=$(git -C "$worktree" merge-tree --write-tree --name-only --no-messages "$old" "$head") && result=0 || result=$?
+    if [ "$result" = 1 ]; then
+      # A conflict of directory renames can name no file.
+      printf '%s\n' "$output" | awk -v target="$target" '
+        NR > 1 { print "blocked\tmerge conflict with " target ": " $0; named = 1 }
+        END { if (!named) print "blocked\tmerge conflict with " target }'
+      return
+    elif [ "$result" != 0 ]; then
+      printf 'blocked\tgit merge-tree failed\n'
+      return
+    fi
+    if ! new=$(git -C "$worktree" commit-tree "$output" -p "$old" -p "$head" -m "Merge branch '$branch' into $target"); then
+      printf 'blocked\tgit commit-tree failed\n'
+      return
+    fi
+    action=merge
+  fi
+
+  # The checkout that has the target branch gets the new files, so its
+  # changes must not be in the way. These are the checks of git merge.
+  checkout=$(branch_checkout "$worktree" "$target")
+  if [ -n "$checkout" ]; then
+    for pending in MERGE_HEAD CHERRY_PICK_HEAD; do
+      if git -C "$checkout" rev-parse --verify --quiet "$pending" >/dev/null; then
+        printf 'blocked\tthe checkout at %s has %s; finish or abort that operation\n' "$checkout" "$pending"
+        return
+      fi
+    done
+    git -C "$checkout" update-index -q --refresh >/dev/null 2>&1 || true
+    if ! output=$(git -C "$checkout" read-tree -n -m -u "$old" "$new" 2>&1); then
+      printf '%s\n' "$output" | awk -v checkout="$checkout" '{ sub(/^error: /, ""); print "blocked\tthe checkout at " checkout ": " $0 }'
+      return
+    fi
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$action" "$target" "$old" "$new" "$head" "$checkout"
+}
+
+cmd_land() {
+  local into="" dry_run=false name="" directory
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --into)
+        [ $# -ge 2 ] || die "--into needs a branch"
+        into=$2
+        shift
+        ;;
+      --into=*) into=${1#--into=} ;;
+      --dry-run) dry_run=true ;;
+      -*) die "unknown option '$1'" ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  if [ -z "$name" ]; then name=$(current_set); fi
+  [ -n "$name" ] || die "land needs a name when the current directory is not in a set"
+  directory=$(set_path "$name")
+  [ -d "$directory" ] || die "no worktree set at $directory"
+  [ ! -e "$directory/.git" ] || die "$directory is a single worktree, not a set"
+
+  local plan=() blocked=false worktree lines
+  while IFS= read -r worktree; do
+    lines=$(landing_plan "$worktree" "$into" </dev/null)
+    case $lines in
+      blocked*)
+        blocked=true
+        info "$(basename "$worktree"):"
+        info "$(printf '%s\n' "$lines" | cut -f 2- | sed 's/^/  /')"
+        ;;
+      *) plan+=("$worktree"$'\t'"$lines") ;;
+    esac
+  done < <(set_worktrees "$directory")
+  if $blocked; then die "nothing was landed; resolve the items above first"; fi
+  [ ${#plan[@]} -gt 0 ] || die "the set at $directory has no repositories"
+
+  local row action target old new head checkout repository count kind
+  for row in "${plan[@]}"; do
+    IFS=$'\t' read -r worktree action target old new head checkout <<<"$row"
+    repository=$(basename "$worktree")
+    if [ "$action" = landed ]; then
+      printf '%s: already in %s; nothing changed\n' "$repository" "$target"
+      continue
+    fi
+    case $action in
+      fast-forward) kind="a fast-forward from $(git -C "$worktree" rev-parse --short "$old")" ;;
+      merge) kind="a merge commit on $(git -C "$worktree" rev-parse --short "$old")" ;;
+    esac
+    count=$(git -C "$worktree" rev-list --count "$old..$head")
+    if [ "$count" = 1 ]; then kind="$kind with 1 commit"; else kind="$kind with $count commits"; fi
+    if $dry_run; then
+      printf '%s: would land in %s as %s%s\n' "$repository" "$target" "$kind" \
+        "${checkout:+; would update the checkout at $checkout}"
+      continue
+    fi
+    if [ -n "$checkout" ]; then
+      GIT_REFLOG_ACTION="worktree-set land $name" git -C "$checkout" merge --ff-only --quiet "$new" >&2 ||
+        die "$repository: Git refused to update $checkout; the repositories above are landed, the others are not. Correct the cause and run land again"
+    else
+      git -C "$worktree" update-ref -m "worktree-set land $name" "refs/heads/$target" "$new" "$old" ||
+        die "$repository: $target moved during the landing; the repositories above are landed, the others are not. Run land again"
+    fi
+    changes_are_in_base "$worktree" "$head" "refs/heads/$target" ||
+      die "$repository: $target does not contain the changes of $name after the landing"
+    printf '%s: landed in %s as %s, %s%s\n' "$repository" "$target" \
+      "$(git -C "$worktree" rev-parse --short "$new")" "$kind" \
+      "${checkout:+; updated the checkout at $checkout}"
+  done
+}
+
 case ${1:-} in
-  new | add | status | remove)
+  new | add | status | remove | land)
     command=$1
     shift
     root=$(find_root)

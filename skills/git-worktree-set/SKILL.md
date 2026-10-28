@@ -1,6 +1,6 @@
 ---
 name: git-worktree-set
-description: Create and manage an isolated task workspace across independent Git repositories that live side by side in one directory (a polyrepo, not a monorepo) with the `git worktree-set` command. Use when the project root is the directory that holds the repositories and a task changes files in one or more of them, when the user asks for a worktree, an isolated workspace, or parallel work across repositories, when the user asks to remove or clean up worktree sets that are merged or stale, or when the current directory is inside `.worktrees/<name>/`. Do not use when the project root is itself one Git repository, or for files outside the repositories, such as reports or presentations.
+description: Create and manage an isolated task workspace across independent Git repositories that live side by side in one directory (a polyrepo, not a monorepo) with the `git worktree-set` command. Use when the project root is the directory that holds the repositories and a task changes files in one or more of them, when the user asks for a worktree, an isolated workspace, or parallel work across repositories, when the user asks to merge or land the work of a set into a local branch such as an integration branch, when the user asks to remove or clean up worktree sets that are merged or stale, or when the current directory is inside `.worktrees/<name>/`. Do not use when the project root is itself one Git repository, or for files outside the repositories, such as reports or presentations.
 ---
 
 # Git worktree set
@@ -79,6 +79,25 @@ Do this only when the user asks for it. One branch can be checked out in only on
 2. Run `git worktree-set remove <name>`. The branch stays when it has work that is not pushed or merged.
 3. In the main checkout, run `git switch <name>`. If `remove` deleted the local branch because it is pushed, Git makes it again from `origin/<name>`.
 
+## Land the set in a branch
+
+Do this only when the user asks for it, for example "merge it into the integration branch". `land` merges the branch of each worktree of the set into a local branch. It updates the checkout that has that branch, usually the main checkout. Do not run `git merge` in a main checkout to land a set.
+
+1. Commit all work in each worktree of the set.
+2. Run, from the root or from inside the set:
+
+```sh
+git worktree-set land --into <branch> <name>
+```
+
+- Without `--into`, `land` uses the branch that `worktree-set.defaultBranch` names in each repository. Without a name, it uses the set that contains the current directory.
+- `land` checks every worktree first. If one check fails, it lands nothing and lists the items. Commit the work in the set. For a conflict, merge the target into the set branch in the worktree (`git -C <worktree> merge <branch>`), resolve, test, and commit; then run `land` again. A change in the main checkout that is in the way is the user's work: report it, and do not commit, stash, or discard it.
+- `land` refuses `main`, `master`, `dev`, and `prod`. Use the promotion process of the project for them. Never go around this refusal with a merge by hand.
+- To check first, add `--dry-run`. It runs all checks and changes nothing.
+- A second `land` of the same set changes nothing and says so.
+- `land` never pushes. Push only when the user asks.
+- Report the line that `land` prints for each repository, and say that nothing is pushed. If it updated a main checkout, tell the user that the files there changed.
+
 ## Publish
 
 Do this only when the user asks for it.
@@ -104,4 +123,4 @@ git worktree-set remove <name>
 
 ## Report
 
-When you finish, tell the user: the set name, the set path, the repositories in it, and the state of each one (committed, pushed, pull request).
+When you finish, tell the user: the set name, the set path, the repositories in it, and the state of each one (committed, landed, pushed, pull request).
