@@ -56,6 +56,8 @@ ln -s "$PWD/skills/git-worktree-set" ~/.codex/skills/git-worktree-set    # Codex
 
 - **No state.** Git is the database. The members of a set are the worktrees in
   its directory. The branch, the main checkout, and the lock come from Git.
+  The [thread note](#thread-note) is output for other tools. The tool never
+  reads it.
 - **No required configuration.** The root is the directory that holds your
   repositories. A repository is a child directory that contains `.git`. The
   tool finds the root from inside any checkout, any worktree, or the root.
@@ -292,8 +294,9 @@ worktree. Use the set hook for setup that applies to the set, such as ports.
 | `GIT_WORKTREE_SET_PORT_BASE` | A stable block of 10 ports, made from the name (10000 to 19990). |
 
 The hook runs again for each `add`, so it must be safe to run more than one
-time. In the set directory, `remove` accepts only symbolic links and the file
-`.worktree-set.env`. Put generated values such as ports in that file.
+time. In the set directory, `remove` accepts only symbolic links, the file
+`.worktree-set.env`, and the thread note (see below). Put generated values
+such as ports in `.worktree-set.env`.
 
 Example:
 
@@ -304,6 +307,30 @@ for repository in $GIT_WORKTREE_SET_REPOSITORIES; do
   if [ -f "$repository/package-lock.json" ]; then (cd "$repository" && npm ci --prefer-offline); fi
 done
 ```
+
+## Thread note
+
+T3 Code runs each agent thread with the environment variable
+`T3CODE_THREAD_ID`. When this variable has a value, the tool adds the value as
+one line to `<root>/.worktrees/<name>/.worktree-set.threads`, if the file does
+not have that line. Thus a monitor can show which threads worked in a set.
+
+The tool writes the note in these cases:
+
+- `new` and `add`, for the set that they make or extend.
+- `status` and `land`, when the current directory is in a set, for that set.
+
+It does not write the note for a set that a command only names from outside
+it, for a command that fails its checks, or for `--dry-run`. `remove` never
+writes it. A value that contains a newline is ignored. If the tool cannot
+write the note, the command continues and prints nothing about it. Two
+commands that run at the same time can add the same value two times, so a
+reader must accept a repeated line.
+
+The note is output only. The tool never reads it, so the tool still has no
+state file. `remove` deletes the note with the set. When the tool makes the
+note, the change to the set directory counts as activity for
+`remove --merged`.
 
 ## Claude Code
 

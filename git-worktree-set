@@ -9,6 +9,10 @@ set -euo pipefail
 SET_DIRECTORY=.worktrees
 LOCK_REASON_PREFIX="git-worktree-set"
 SETUP_HOOK=.worktree-set-setup
+# A note for other tools: the agent threads that worked in a set, one ID per
+# line. The tool writes it and never reads it.
+THREAD_VARIABLE=T3CODE_THREAD_ID
+THREAD_NOTE=.worktree-set.threads
 # The path of this script, usable after a change of directory.
 self=$0
 case $self in /*) ;; *) self=$PWD/$self ;; esac
@@ -102,6 +106,25 @@ current_set() {
       printf '%s' "${here%%/*}"
       ;;
   esac
+}
+
+# Appends the thread ID from $THREAD_VARIABLE to the note of the set at $1, if
+# the note does not have it. Best effort: a failure changes nothing and prints
+# nothing.
+record_thread() {
+  local thread=${!THREAD_VARIABLE:-} note=$1/$THREAD_NOTE
+  [ -n "$thread" ] && [ -d "$1" ] && [ ! -e "$1/.git" ] || return 0
+  case $thread in *$'\n'*) return 0 ;; esac
+  if ! grep -qxF -- "$thread" "$note" 2>/dev/null; then
+    { printf '%s\n' "$thread" >>"$note"; } 2>/dev/null || true
+  fi
+}
+
+# Records the thread in the set that contains the current directory, if any.
+record_thread_in_current_set() {
+  local name
+  name=$(current_set)
+  if [ -n "$name" ]; then record_thread "$root/$SET_DIRECTORY/$name"; fi
 }
 
 set_worktrees() {
@@ -245,6 +268,7 @@ cmd_new() {
   done
 
   mkdir -p "$directory"
+  record_thread "$directory"
   for repository in ${repositories[@]+"${repositories[@]}"}; do
     main=$root/$repository
     target=$directory/$repository
@@ -341,6 +365,7 @@ cmd_status() {
       fi
     done < <(set_worktrees "$directory")
   done
+  record_thread_in_current_set
 }
 
 # For a detached worktree at $1: where its set branch is checked out, if it is.
@@ -397,14 +422,14 @@ removal_blockers() {
 }
 
 # Entries of a set directory that are not worktrees. Safe to delete: a symbolic
-# link, the setup hook output file, and .DS_Store.
+# link, the setup hook output file, the thread note, and .DS_Store.
 set_extra_entries() {
   local kind=$1 directory=$2 entry safe
   for entry in "$directory"/* "$directory"/.[!.]*; do
     if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then continue; fi
     if [ ! -L "$entry" ] && [ -e "$entry/.git" ]; then continue; fi
     safe=false
-    case $(basename "$entry") in .worktree-set.env | .DS_Store) safe=true ;; esac
+    case $(basename "$entry") in .worktree-set.env | "$THREAD_NOTE" | .DS_Store) safe=true ;; esac
     if [ -L "$entry" ]; then safe=true; fi
     if { [ "$kind" = safe ] && $safe; } || { [ "$kind" = unsafe ] && ! $safe; }; then
       printf '%s\n' "$entry"
@@ -708,6 +733,7 @@ cmd_land() {
   done < <(set_worktrees "$directory")
   if $blocked; then die "nothing was landed; resolve the items above first"; fi
   [ ${#plan[@]} -gt 0 ] || die "the set at $directory has no repositories"
+  $dry_run || record_thread_in_current_set
 
   local row action target old new head checkout repository count kind
   for row in "${plan[@]}"; do
