@@ -65,6 +65,7 @@ To only read a repository that is not in the set, you can read its main checkout
 - Commit in each repository separately. One commit cannot span repositories.
 - A new worktree has no installed dependencies and no ignored files, unless the root has a setup hook or a `.worktreeinclude` file. If a build or a test fails because of this, install the dependencies in the worktree. Do not copy secrets by hand into tracked files.
 - If the set directory has a `.worktree-set.env` file, read values such as ports from it.
+- The set directory can have a `.worktree-set.threads` file. The tool writes in it the T3 Code thread IDs (`T3CODE_THREAD_ID`) that worked in the set. Do not edit it. `remove` deletes it with the set.
 - Use `git worktree-set status` for one view of all repositories. `--porcelain` gives tab-separated fields: set, repository, branch, changed files, commits on no remote, path.
 
 ## Parallel agents

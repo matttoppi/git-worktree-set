@@ -13,8 +13,16 @@ export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 mkdir -p "$HOME" "$sandbox/remotes" "$sandbox/root"
 root=$sandbox/root
 failures=0
+# The tests run the same inside and outside an agent thread. The tests of the
+# thread note set the variable for each command.
+unset T3CODE_THREAD_ID
 
 worktree_set() { "$shell" "$tool" "$@"; }
+as_thread() { # as_thread <thread ID> <arguments...>
+  local thread=$1
+  shift
+  env T3CODE_THREAD_ID="$thread" "$shell" "$tool" "$@"
+}
 
 check() { # check <description> <command...>
   local description=$1
@@ -322,6 +330,44 @@ worktree_set land --into golden-hour cas-25 >/dev/null 2>&1
 (cd "$split/bridge" && mkdir one two && git mv directory/x.txt one/ && git mv directory/y.txt two/ && git commit -qm "split the directory")
 check "land refuses a conflict that names no file (a directory rename split)" \
   fails_with "merge conflict with golden-hour" worktree_set land --into golden-hour cas-24
+
+# --- the thread note
+threads=$(as_thread thread-a new cas-30 ui 2>/dev/null)
+note=$threads/.worktree-set.threads
+check "new writes the thread ID to the note of the set" test "$(cat "$note")" = thread-a
+(cd "$threads/ui" && as_thread thread-a status && as_thread thread-a add bridge) >/dev/null 2>&1
+as_thread thread-a new cas-30 lambdas >/dev/null 2>&1
+check "new, add, and status in the same thread do not repeat its ID" test "$(cat "$note")" = thread-a
+(cd "$threads" && as_thread thread-b status) >/dev/null 2>&1
+check "status inside the set in a different thread appends its ID" test "$(cat "$note")" = "thread-a
+thread-b"
+as_thread thread-c status cas-30 >/dev/null 2>&1
+check "status <name> from the root does not record the thread" test "$(cat "$note")" = "thread-a
+thread-b"
+(cd "$threads/ui" && as_thread thread-d remove --dry-run) >/dev/null 2>&1
+check "remove --dry-run inside the set does not record the thread" test "$(cat "$note")" = "thread-a
+thread-b"
+(cd "$threads" && as_thread $'thread-e\nthread-f' status) >/dev/null 2>&1
+check "a thread ID with a newline is not recorded" test "$(cat "$note")" = "thread-a
+thread-b"
+rm -f "$note"
+chmod a-w "$threads"
+check "a note that cannot be written does not fail the command and prints nothing" \
+  test "$(cd "$threads" && as_thread thread-g status 2>&1 >/dev/null; echo "exit $?")" = "exit 0"
+chmod u+w "$threads"
+printf 'thread-a\n' >"$note"
+check "remove succeeds for a set that has the note" worktree_set remove cas-30
+check "remove deletes the note with the set" test ! -e "$threads"
+untracked=$(env -u T3CODE_THREAD_ID "$shell" "$tool" new cas-31 ui 2>/dev/null)
+(cd "$untracked" && as_thread "" status) >/dev/null 2>&1
+check "without the variable, or with an empty value, no note is written" test ! -e "$untracked/.worktree-set.threads"
+worktree_set remove cas-31 >/dev/null 2>&1
+landed=$(as_thread "" new --from golden-hour cas-32 bridge 2>/dev/null)
+(cd "$landed/bridge" && echo thread >thread.txt && git add thread.txt && git commit -qm "thread work")
+(cd "$landed/bridge" && as_thread thread-h land --into golden-hour --dry-run) >/dev/null 2>&1
+check "land --dry-run inside the set does not record the thread" test ! -e "$landed/.worktree-set.threads"
+(cd "$landed/bridge" && as_thread thread-h land --into golden-hour) >/dev/null 2>&1
+check "land inside the set records the thread" test "$(cat "$landed/.worktree-set.threads")" = thread-h
 
 if [ "$failures" -eq 0 ]; then
   echo "all tests passed"
